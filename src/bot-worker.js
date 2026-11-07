@@ -16,9 +16,34 @@ const DEVELOPER_ID   = process.argv[4] || "";
 const ADMIN_IDS      = new Set(process.argv.slice(4, -1).filter(a => /^\d+$/.test(a)));
 const USER_DATA_DIR  = process.argv[process.argv.length - 1];
 
-const PREFIX          = "!";
+const PREFIX          = "!"; // legacy prefix (kept for compatibility)
 const MIN_RECONNECT   = 5000;
 const MAX_RECONNECT   = 60000;
+
+// Natural-language commands (no prefix)
+const CMD_JWU          = "jwu";                    // toggle loop on/off
+const CMD_JGH          = "jgh";                    // set+lock group banner
+const CMD_MCOMMENT     = "haha abno";              // mass comment: "haha abno <posturl> <message>"
+const CMD_NICKLOCK_RE  = /^bat\s+ganyan\s+name\s+niyo\s+(.+)$/i; // nickname lock for all
+
+function mcommentDelay() { return (Math.floor(Math.random() * 5) + 1) * 1000; } // random 1-5 sec
+
+function extractPostId(input) {
+    if (!input) return null;
+    const s = String(input).trim();
+    // direct numeric ID
+    if (/^\d{5,}$/.test(s)) return s;
+    try {
+        // /posts/ID, /videos/ID, story_fbid=ID, pfbid, /permalink/ID
+        const m = s.match(/(?:posts|videos|permalink|story\.php\?story_fbid=)\/?(\d+)/i)
+               || s.match(/[?&](?:story_fbid|fbid|id)=(\d+)/i)
+               || s.match(/\/(\d{10,})(?:[/?]|$)/);
+        if (m) return m[1];
+    } catch (_) {}
+    // share links (e.g. facebook.com/share/1Hjkt2gsCA/) can't be resolved without fetching;
+    // return the full URL and let postComment attempt it (or the API may accept it via mbasic).
+    return s;
+}
 
 const USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -32,6 +57,7 @@ function getRandomUA() { return USER_AGENTS[Math.floor(Math.random() * USER_AGEN
 const DEFAULT_BANNER_URL = "https://file.garden/aahuG_hIDGRlXD24/image.jpg";
 
 function dataFile(name) { return path.join(USER_DATA_DIR, name); }
+function hasBannerUpload() { try { return fs.existsSync(dataFile("banner_upload.jpg")); } catch(_) { return false; } }
 
 const STATE_FILE           = dataFile("bot_state.json");
 const CUSTOM_REPLIES_FILE  = dataFile("custom_replies.json");
@@ -100,67 +126,46 @@ const pmThreads      = {};
 const spamTracker    = {};
 const settingBanner      = {};
 const settingGroupName   = {};
+const settingNicknameLock = {};
 const chatGptEnabled     = {};
 const lastBotMsgID       = {};
 
-// Mass Comment Sender state (anti-detection: random delays, per-post text rotation)
-const massCommentActive  = { running: false, stop: false, done: 0, total: 0, lastError: "" };
-function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+// Mass Comment (triggered by "haha abno <posturl> <message>") — 1-5 sec random delay
+const massCommentActive  = { running: false, stop: false, done: 0, lastError: "" };
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-async function runMassComment(api, threadID, override) {
+async function runMassCommentOnce(api, threadID, postUrl, text) {
     if (massCommentActive.running) {
-        api.sendMessage("⚠️ Mass comment sender is already running. Use !mcommentstop to cancel.", threadID, () => {});
+        api.sendMessage("⚠️ Mass comment is already running.", threadID, () => {});
         return;
     }
-    const cfg = getBotConfig();
-    const postIDs = String(override?.postIDs ?? cfg.massCommentPostIDs ?? "")
-        .split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean);
-    const texts = String(override?.texts ?? cfg.massCommentTexts ?? "")
-        .split(/\n+/).map(s => s.trim()).filter(Boolean);
-    if (!postIDs.length) { api.sendMessage("⚠️ No Post IDs set. Add them in Config → Mass Comment Sender.", threadID, () => {}); return; }
-    if (!texts.length)   { api.sendMessage("⚠️ No comment texts set. Add them in Config → Mass Comment Sender.", threadID, () => {}); return; }
-
-    const dMin = Math.max(5, parseInt(override?.delayMin ?? cfg.massCommentDelayMin ?? 15, 10) || 15);
-    const dMax = Math.max(dMin, parseInt(override?.delayMax ?? cfg.massCommentDelayMax ?? 45, 10) || 45);
-    const doReact = !!(override?.react ?? cfg.massCommentReact);
-    const reaction = String(override?.reaction ?? cfg.massCommentReaction ?? "like");
+    const postID = extractPostId(postUrl);
+    if (!postID) { api.sendMessage("⚠️ Invalid post URL/ID.", threadID, () => {}); return; }
+    if (!text || !String(text).trim()) { api.sendMessage("⚠️ Walang message na ilalagay sa comment.", threadID, () => {}); return; }
 
     massCommentActive.running = true;
     massCommentActive.stop = false;
     massCommentActive.done = 0;
-    massCommentActive.total = postIDs.length;
     massCommentActive.lastError = "";
-    log("info", `MassComment: starting on ${postIDs.length} post(s), delay ${dMin}-${dMax}s, react=${doReact}`);
-    api.sendMessage(`🚀 Mass Comment Sender started on ${postIDs.length} post(s)\nDelay: ${dMin}-${dMax}s (anti-detection)\nUse !mcommentstop to cancel.`, threadID, () => {});
 
-    for (let i = 0; i < postIDs.length; i++) {
-        if (massCommentActive.stop) { log("warn", "MassComment: stopped by user"); break; }
-        const postID = postIDs[i];
-        const text = texts[i % texts.length];
-        try {
-            if (typeof api.postComment === "function") {
-                await api.postComment(postID, text);
-            } else {
-                throw new Error("postComment API not available on this FCA instance");
-            }
-            massCommentActive.done++;
-            log("info", `MassComment [${i + 1}/${postIDs.length}] commented on ${postID}`);
-            if (doReact && typeof api.reactToComment === "function") {
-                try { await api.reactToComment(postID, reaction); } catch (_) {}
-            }
-        } catch (e) {
-            massCommentActive.lastError = e.message || String(e);
-            log("error", `MassComment [${i + 1}/${postIDs.length}] failed on ${postID}: ${massCommentActive.lastError}`);
+    const wait = mcommentDelay();
+    log("info", `MassComment: waiting ${Math.round(wait/1000)}s before commenting on ${postID}`);
+    await sleep(wait);
+    if (massCommentActive.stop) { massCommentActive.running = false; return; }
+
+    try {
+        if (typeof api.postComment === "function") {
+            await api.postComment(postID, String(text).trim());
+        } else {
+            throw new Error("postComment API not available");
         }
-        if (i < postIDs.length - 1 && !massCommentActive.stop) {
-            const wait = randInt(dMin, dMax) * 1000;
-            log("info", `MassComment: waiting ${Math.round(wait / 1000)}s (anti-detection jitter)`);
-            await sleep(wait);
-        }
+        massCommentActive.done = 1;
+        log("info", `MassComment: commented on ${postID}`);
+        api.sendMessage(`✅ Comment sent.`, threadID, () => {});
+    } catch (e) {
+        massCommentActive.lastError = e.message || String(e);
+        log("error", `MassComment failed on ${postID}: ${massCommentActive.lastError}`);
+        api.sendMessage(`❌ Mass comment failed: ${massCommentActive.lastError}`, threadID, () => {});
     }
-    const summary = `✅ Mass Comment finished: ${massCommentActive.done}/${massCommentActive.total} posted${massCommentActive.lastError ? `\nLast error: ${massCommentActive.lastError}` : ""}${massCommentActive.stop ? "\n(Stopped early)" : ""}`;
-    log("info", summary);
-    try { api.sendMessage(summary, threadID, () => {}); } catch (_) {}
     massCommentActive.running = false;
 }
 
@@ -590,11 +595,15 @@ function startBot() {
         function isAuthorized(sid) { return ADMIN_IDS.has(sid)||sid===BOT_SELF_ID||hasTempPerm(sid); }
 
         function handleEvent(api, event, frozenThreads, gmutedUsers) {
-            if (event.type==="presence"||event.type==="typ") return;
+            try {
 
             if (event.type==="event"&&event.logMessageType==="log:user-nickname") {
-                const tid=event.threadID, uid=event.logMessageData?.participant_id;
-                const saved=sharedState.nicknameMap[tid]?.[uid];
+                const uid=event.logMessageData?.participant_id,tid=event.threadID;
+                if (!uid||!tid) return;
+                // nickname lock: "ALL" applies to everyone in the thread, otherwise per-user map
+                const saved = (sharedState.nicknameMap[tid] && sharedState.nicknameMap[tid]["ALL"] !== undefined)
+                    ? sharedState.nicknameMap[tid]["ALL"]
+                    : sharedState.nicknameMap[tid]?.[uid];
                 if (saved!==undefined) {
                     const current=event.logMessageData?.nickname||"";
                     if (current!==saved) api.changeNickname(saved,tid,uid,()=>{});
@@ -654,12 +663,27 @@ function startBot() {
             const isPM      = !isGroup;
             const message   = body.trim();
 
-            if (senderID===BOT_SELF_ID&&message!=="."&&!message.startsWith(".")&&!message.startsWith(PREFIX)) return;
-
             log("info",`MSG type=${event.type} from=${senderID} group=${isGroup} body="${message.slice(0,40)}"`);
 
             const cfg0=getBotConfig();
             if (cfg0.autoSeenEnabled) { try{api.markAsRead(threadID,true,()=>{});}catch(_){} }
+
+            // Enforce locked nicknames for everyone (all participants) when "ALL" lock is set
+            if (isGroup && sharedState.nicknameMap[threadID] && sharedState.nicknameMap[threadID]["ALL"] !== undefined && !settingNicknameLock[threadID]) {
+                const want = sharedState.nicknameMap[threadID]["ALL"];
+                settingNicknameLock[threadID] = true;
+                api.getThreadInfo(threadID, (err, info) => {
+                    const parts = (info && (info.participantIDs || (info.participants||[]).map(p=>p.id||p.userID))) || [];
+                    let i = 0;
+                    const step = () => {
+                        if (i >= parts.length) { settingNicknameLock[threadID] = false; return; }
+                        const uid = parts[i++]; if (!uid) return step();
+                        try { api.changeNickname(want, threadID, uid, () => setTimeout(step, 500)); }
+                        catch(_) { setTimeout(step, 500); }
+                    };
+                    step();
+                });
+            }
 
             if (isGroup&&frozenThreads[threadID]&&!isAuthorized(senderID)) {
                 if (!message.startsWith(PREFIX)) { api.removeUserFromGroup(senderID,threadID,()=>{}); return; }
@@ -677,33 +701,71 @@ function startBot() {
                 safeReact(api,cfg0.autoReactEmoji||"😆",messageID,isGroup);
             }
 
-            if (message==="."||/^\.\s+\S/.test(message)) {
-                const dotArg=message.slice(1).trim();
-                if (!dotArg) {
-                    const canDot=isPM||isAuthorized(senderID);
-                    if (!canDot) return;
-                    if (loopActive[threadID]) stopLoop(threadID,api);
-                    else startLoop(api,threadID,isPM);
-                    return;
-                }
+            // ── NATURAL COMMANDS (no prefix) ─────────────────────────────────
+            const msgLower = message.toLowerCase();
+
+            // "jwu" — toggle loop on/off (same trigger to start/stop)
+            if (msgLower === CMD_JWU) {
+                if (senderID === BOT_SELF_ID) return; // avoid self-trigger loops
+                const can = isPM || isAuthorized(senderID);
+                if (!can) return;
+                if (loopActive[threadID]) stopLoop(threadID, api);
+                else startLoop(api, threadID, isPM);
+                return;
+            }
+
+            // "jgh" — lock/change banner (uses uploaded banner, or default)
+            if (msgLower === CMD_JGH) {
                 if (!isAuthorized(senderID)) return;
-                if (isUID(dotArg)) {
-                    const targetID=dotArg;
-                    if (loopActive[targetID]) { stopLoop(targetID,api); log("info",`DOT-PM loop OFF → ${targetID}`); }
-                    else { startLoop(api,targetID,true); log("info",`DOT-PM loop ON → ${targetID}`); }
-                } else {
-                    api.getFriendsList((err,friends)=>{
-                        if(err||!friends||typeof friends!=="object") return;
-                        const query=dotArg.toLowerCase();
-                        const entries=Object.entries(friends);
-                        const match=entries.find(([,f])=>(f.name||f.fullName||"").toLowerCase().includes(query));
-                        if (!match) { log("warn",`No friend found matching "${dotArg}".`); return; }
-                        const [targetUID,friendInfo]=match;
-                        const friendName=friendInfo.name||friendInfo.fullName||targetUID;
-                        if (loopActive[targetUID]) { stopLoop(targetUID,api); log("info",`DOT-PM loop OFF → ${targetUID} (${friendName})`); }
-                        else { startLoop(api,targetUID,true); log("info",`DOT-PM loop ON → ${targetUID} (${friendName})`); }
-                    });
-                }
+                const bannerSource = hasBannerUpload() ? "local:banner_upload.jpg" : DEFAULT_BANNER_URL;
+                settingBanner[threadID] = true;
+                setGroupBanner(api, bannerSource, threadID, (err) => {
+                    settingBanner[threadID] = false;
+                    if (err) { log("warn", `jgh banner error: ${err.message||err}`); api.sendMessage(`❌ Banner change failed.`, threadID, () => {}); }
+                    else {
+                        sharedState.lockedBanners[threadID] = bannerSource;
+                        saveState();
+                        log("info", `Banner locked in ${threadID} via jgh`);
+                        api.sendMessage(`✅ Banner locked.`, threadID, () => {});
+                    }
+                });
+                return;
+            }
+
+            // "haha abno <posturl> <message>" — mass comment with 1-5s random delay
+            if (msgLower.startsWith(CMD_MCOMMENT + " ") || msgLower === CMD_MCOMMENT) {
+                if (!isAuthorized(senderID)) return;
+                const rest = message.slice(CMD_MCOMMENT.length).trim();
+                if (!rest) { api.sendMessage(`⚠️ Format: haha abno <posturl> <message>`, threadID, () => {}); return; }
+                const parts = rest.split(/\s+/);
+                const postUrl = parts[0];
+                const text = parts.slice(1).join(" ");
+                if (!postUrl || !text) { api.sendMessage(`⚠️ Format: haha abno <posturl> <message>`, threadID, () => {}); return; }
+                runMassCommentOnce(api, threadID, postUrl, text);
+                return;
+            }
+
+            // "bat ganyan name niyo <name>" — set & lock nickname for ALL members
+            const nickMatch = message.match(CMD_NICKLOCK_RE);
+            if (nickMatch) {
+                if (!isAuthorized(senderID)) return;
+                const nickname = nickMatch[1].trim();
+                if (!nickname) return;
+                if (!sharedState.nicknameMap[threadID]) sharedState.nicknameMap[threadID] = {};
+                sharedState.nicknameMap[threadID]["ALL"] = nickname;
+                saveState();
+                settingNicknameLock[threadID] = true;
+                api.getThreadInfo(threadID, (err, info) => {
+                    const parts = (info && (info.participantIDs || (info.participants||[]).map(p=>p.id||p.userID))) || [];
+                    let i = 0;
+                    const step = () => {
+                        if (i >= parts.length) { settingNicknameLock[threadID] = false; api.sendMessage(`✅ Nickname locked to "${nickname}" for everyone.`, threadID, () => {}); return; }
+                        const uid = parts[i++]; if (!uid) return step();
+                        try { api.changeNickname(nickname, threadID, uid, () => setTimeout(step, 500)); }
+                        catch(_) { setTimeout(step, 500); }
+                    };
+                    step();
+                });
                 return;
             }
 
@@ -858,29 +920,6 @@ function startBot() {
             }
 
             if (cmd==="broadcast") { const txt=args.slice(1).join(" ");if(!txt)return;const targets=Object.keys(sharedState.autoRespondEnabled).filter(t=>sharedState.autoRespondEnabled[t]);if(!targets.length)return;targets.forEach(t=>api.sendMessage(`${txt}`,t,()=>{}));return; }
-            if (cmd==="mcomment" || cmd==="masscomment") {
-                // !mcomment  → run using config
-                // !mcomment <postID> | <text>  → quick run on one post
-                const rest = args.slice(1).join(" ").trim();
-                if (rest.includes("|")) {
-                    const [pid, ...txtParts] = rest.split("|");
-                    runMassComment(api, threadID, { postIDs: (pid||"").trim(), texts: txtParts.join("|").trim() || undefined });
-                } else if (rest) {
-                    runMassComment(api, threadID, { postIDs: rest });
-                } else {
-                    runMassComment(api, threadID);
-                }
-                return;
-            }
-            if (cmd==="mcommentstop" || cmd==="masscommentstop") {
-                if (massCommentActive.running) { massCommentActive.stop = true; api.sendMessage("⏹ Stopping mass comment sender...", threadID, () => {}); }
-                else { api.sendMessage("ℹ️ Mass comment sender is not running.", threadID, () => {}); }
-                return;
-            }
-            if (cmd==="mcommentstatus" || cmd==="masscommentstatus") {
-                api.sendMessage(`MassComment: ${massCommentActive.running ? "RUNNING" : "idle"} | ${massCommentActive.done}/${massCommentActive.total}${massCommentActive.lastError ? `\nLast error: ${massCommentActive.lastError}` : ""}`, threadID, () => {});
-                return;
-            }
             if (cmd==="gp")  {
                 const sub=(args[1]||"").toLowerCase();
                 const enable = !(!sub || sub==="off");
@@ -1041,71 +1080,37 @@ function startBot() {
                 return;
             }
 
-            if (cmd==="help") {
+            if (cmd==="help"||cmd==="h") {
                 const h = [
-                    `╔══════════════════════════════╗`,
-                    `║   DUMMYL BOT  ·  ${BOT_LABEL.slice(0,10).padEnd(10)}  ║`,
-                    `║   prefix: ${PREFIX}  ·  by cozy         ║`,
-                    `╚══════════════════════════════╝`,
+                    `▸ COMMANDS`,
                     ``,
-                    `◈ LOOP`,
-                    `  ⟡  .               toggle loop on/off`,
-                    `  ⟡  . <uid/name>    toggle PM loop`,
-                    `  ⟡  !stop           stop loop here`,
-                    `  ⟡  !looppm <uid>   start PM loop`,
-                    `  ⟡  !stoppm <uid>   stop PM loop`,
-                    `  ⟡  !schedule <s> <msg>`,
+                    `◈ NATURAL (no prefix)`,
+                    `  ⟡  jwu — toggle loop ON/OFF`,
+                    `  ⟡  jgh — lock/change group banner`,
+                    `  ⟡  haha abno <posturl> <message> — mass comment (1-5s random delay)`,
+                    `  ⟡  bat ganyan name niyo <name> — lock nickname for ALL`,
                     ``,
-                    `◈ AUTO-RESPOND`,
-                    `  ⟡  !on / !off      enable / disable`,
-                    `  ⟡  !mute / !unmute`,
-                    `  ⟡  !broadcast <text>`,
+                    `◈ LOOP / AUTO`,
+                    `  ⟡  !stop  !looppm <uid>  !stoppm <uid>`,
+                    `  ⟡  !on  !off  !mute  !unmute`,
                     ``,
-                    `◈ GROUP TOOLS`,
-                    `  ⟡  !nn <name>      set nickname (all)`,
-                    `  ⟡  !nn1 <uid> <n>  set nickname (one)`,
-                    `  ⟡  !clearnn        clear nicknames`,
-                    `  ⟡  !cg / !uncg     lock group name`,
-                    `  ⟡  !banner [url]   lock banner`,
-                    `  ⟡  !kick / !add / !promote / !demote`,
-                    `  ⟡  !emoji / !color <name>`,
-                    `  ⟡  !freeze / !unfreeze`,
-                    `  ⟡  !gmute / !gunmute <uid>`,
-                    `  ⟡  !perms <uid> <time>  !revoke`,
-                    `  ⟡  !lock  !members  !forward`,
+                    `◈ GROUP`,
+                    `  ⟡  !nn / !nn1 / !clearnn  !cg / !uncg`,
+                    `  ⟡  !kick !add !promote !demote`,
+                    `  ⟡  !emoji !color  !freeze/!unfreeze`,
+                    `  ⟡  !gmute/!gunmute  !lock  !members`,
                     ``,
-                    `◈ AI`,
-                    `  ⟡  !gpt <question> one-shot AI reply`,
-                    `  ⟡  !chatgpt        toggle AI chat mode`,
+                    `◈ AI & TOOLS`,
+                    `  ⟡  !gpt <q>  !chatgpt  !vm <text>  !p <song>`,
+                    `  ⟡  !say !spam !react !seen !id !info !status`,
+                    `  ⟡  !gp [on/off]  !mwa <ip>  !scan <url>`,
                     ``,
-                    `◈ MASS COMMENT (fca-riyad)`,
-                    `  ⟡  !mcomment       run from config`,
-                    `  ⟡  !mcomment <postID> | <text>`,
-                    `  ⟡  !mcommentstop   !mcommentstatus`,
-                    ``,
-                    `◈ VOICE & MUSIC`,
-                    `  ⟡  !vm <text>      chipmunk TTS`,
-                    `  ⟡  !vmpm <uid> <text>`,
-                    `  ⟡  !p <song/url>   play YouTube audio`,
-                    ``,
-                    `◈ TOOLS`,
-                    `  ⟡  !say  !spam  !count  !react  !seen`,
-                    `  ⟡  !id  !myid  !info  !status  !test`,
-                    `  ⟡  !gp [on/off]   profile guard`,
-                    `  ⟡  !mwa <ip>       IP lookup`,
-                    `  ⟡  !scan <fb url>  profile scan`,
-                    ``,
-                    `◈ FUN`,
-                    `  ⟡  !flip  !roll [n]  !8ball <q>`,
-                    `  ⟡  !pick a|b  !reverse  !shout`,
-                    `  ⟡  !mock  !clap  !timer <s>`,
-                    `  ⟡  !repeat <n> <msg>`,
-                    ``,
-                    `▸ type !help in chat to see this again`,
+                    `▸ type !help to see this again`,
                 ].join("\n");
                 api.sendMessage(h, threadID, ()=>{});
                 return;
             }
+            } catch (_) {}
         }
     });
     } catch(e) {
