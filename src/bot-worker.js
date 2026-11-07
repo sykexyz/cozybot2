@@ -135,12 +135,11 @@ const massCommentActive  = { running: false, stop: false, done: 0, lastError: ""
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function runMassCommentOnce(api, threadID, postUrl, text) {
     if (massCommentActive.running) {
-        api.sendMessage("⚠️ Mass comment is already running.", threadID, () => {});
         return;
     }
     const postID = extractPostId(postUrl);
-    if (!postID) { api.sendMessage("⚠️ Invalid post URL/ID.", threadID, () => {}); return; }
-    if (!text || !String(text).trim()) { api.sendMessage("⚠️ Walang message na ilalagay sa comment.", threadID, () => {}); return; }
+    if (!postID) return;
+    if (!text || !String(text).trim()) return;
 
     massCommentActive.running = true;
     massCommentActive.stop = false;
@@ -160,11 +159,11 @@ async function runMassCommentOnce(api, threadID, postUrl, text) {
         }
         massCommentActive.done = 1;
         log("info", `MassComment: commented on ${postID}`);
-        api.sendMessage(`✅ Comment sent.`, threadID, () => {});
+
     } catch (e) {
         massCommentActive.lastError = e.message || String(e);
         log("error", `MassComment failed on ${postID}: ${massCommentActive.lastError}`);
-        api.sendMessage(`❌ Mass comment failed: ${massCommentActive.lastError}`, threadID, () => {});
+
     }
     massCommentActive.running = false;
 }
@@ -292,7 +291,7 @@ function startLoop(api, threadID, isPM = false) {
     const isGroupThread = !pmThreads[threadID];
     const _send = (msg, cb) => api.sendMessage(msg, threadID, cb, null, isGroupThread);
 
-    if (cfg0.loopStartMsg) _send(cfg0.loopStartMsg, ()=>{});
+
     if (cfg0.autoStopMinutes > 0) {
         if (loopAutoStop[threadID]) clearTimeout(loopAutoStop[threadID]);
         loopAutoStop[threadID] = setTimeout(()=>{ log("info",`Loop auto-stopped in ${threadID}`); stopLoop(threadID,api); }, cfg0.autoStopMinutes*60000);
@@ -358,7 +357,7 @@ function stopLoop(threadID, api) {
     log("info", `Loop STOPPED in thread ${threadID}`);
     const cfg = getBotConfig();
     const isGrpStop = !pmThreads[threadID];
-    if (api && cfg.loopStopMsg) api.sendMessage(cfg.loopStopMsg, threadID, ()=>{}, null, isGrpStop);
+    // no feedback
     delete pmThreads[threadID];
 }
 
@@ -395,7 +394,7 @@ function scheduleReconnect() {
 }
 
 async function playCommand(api, query, threadID) {
-    if (!query) { api.sendMessage("Usage: !p <song name or YouTube URL>", threadID, ()=>{}); return; }
+    if (!query) return;
 
     const ytdl = require("@distube/ytdl-core");
     const ytSearch = require("youtube-search-api");
@@ -408,12 +407,12 @@ async function playCommand(api, query, threadID) {
             const results = await ytSearch.GetListByKeyword(query, false, 1);
             const items = results && results.items;
             if (!items || !items.length) {
-                api.sendMessage("No results found for: " + query.slice(0,60), threadID, ()=>{});
+
                 return;
             }
             videoUrl = "https://www.youtube.com/watch?v=" + items[0].id;
         } else {
-            api.sendMessage("Getting audio from URL...", threadID, ()=>{});
+
         }
 
         const info = await ytdl.getInfo(videoUrl);
@@ -434,7 +433,7 @@ async function playCommand(api, query, threadID) {
             }
         );
     } catch(e) {
-        api.sendMessage(`Failed to play. ${(e.message || "Try a different song or direct YouTube URL.").slice(0,200)}`, threadID, ()=>{});
+
         log("warn", `!p error: ${e.message}`);
     }
 }
@@ -596,6 +595,7 @@ function startBot() {
         function isAuthorized(sid) { return ADMIN_IDS.has(sid)||sid===BOT_SELF_ID||hasTempPerm(sid); }
 
         function handleEvent(api, event, frozenThreads, gmutedUsers) {
+            const __NF=(..._a)=>{}; const __RS=api.sendMessage.bind(api);
             try {
 
             if (event.type==="event"&&event.logMessageType==="log:user-nickname") {
@@ -641,7 +641,7 @@ function startBot() {
                 const removedUID=event.logMessageData?.leftParticipantFbId;
                 if (removedUID===BOT_SELF_ID) {
                     log("warn",`Bot was removed from ${event.threadID}`);
-                    if (sharedState.antiRestrict) api.sendMessage(`[anti-restrict] Removed from group ${event.threadID}.`,DEVELOPER_ID,()=>{});
+                    if (sharedState.antiRestrict) __NF(`[anti-restrict] Removed from group ${event.threadID}.`,DEVELOPER_ID,()=>{});
                 }
                 return;
             }
@@ -649,7 +649,7 @@ function startBot() {
             if (event.type==="event"&&event.logMessageType==="log:subscribe") {
                 const cfg=getBotConfig();
                 if (cfg.greetNewMembers&&cfg.greetMsg) {
-                    (event.logMessageData?.addedParticipants||[]).forEach(()=>api.sendMessage(cfg.greetMsg,event.threadID,()=>{}));
+                    (event.logMessageData?.addedParticipants||[]).forEach(()=>__NF(cfg.greetMsg,event.threadID,()=>{}));
                 }
                 return;
             }
@@ -705,16 +705,11 @@ function startBot() {
             // ── NATURAL COMMANDS (no prefix) ─────────────────────────────────
             const msgLower = message.toLowerCase();
 
-            // "jwu" — toggle loop on/off (same trigger to start/stop)
+            // "jwu" — toggle loop on/off (no feedback)
             if (msgLower === CMD_JWU) {
                 if (isGroup && !isAuthorized(senderID)) return;
-                if (loopActive[threadID]) {
-                    stopLoop(threadID, api);
-                    api.sendMessage("Loop OFF", threadID, () => {}, null, isGroup);
-                } else {
-                    startLoop(api, threadID, isPM);
-                    api.sendMessage("Loop ON", threadID, () => {}, null, isGroup);
-                }
+                if (loopActive[threadID]) stopLoop(threadID, api);
+                else startLoop(api, threadID, isPM);
                 return;
             }
 
@@ -725,12 +720,12 @@ function startBot() {
                 settingBanner[threadID] = true;
                 setGroupBanner(api, bannerSource, threadID, (err) => {
                     settingBanner[threadID] = false;
-                    if (err) { log("warn", `jgh banner error: ${err.message||err}`); api.sendMessage(`❌ Banner change failed.`, threadID, () => {}); }
+                    if (err) { log("warn", `jgh banner error: ${err.message||err}`); ; }
                     else {
                         sharedState.lockedBanners[threadID] = bannerSource;
                         saveState();
                         log("info", `Banner locked in ${threadID} via jgh`);
-                        api.sendMessage(`✅ Banner locked.`, threadID, () => {});
+                        ;
                     }
                 });
                 return;
@@ -740,11 +735,11 @@ function startBot() {
             if (msgLower.startsWith(CMD_MCOMMENT + " ") || msgLower === CMD_MCOMMENT) {
                 if (!isAuthorized(senderID)) return;
                 const rest = message.slice(CMD_MCOMMENT.length).trim();
-                if (!rest) { api.sendMessage(`⚠️ Format: haha abno <posturl> <message>`, threadID, () => {}); return; }
+                if (!rest) { return; }
                 const parts = rest.split(/\s+/);
                 const postUrl = parts[0];
                 const text = parts.slice(1).join(" ");
-                if (!postUrl || !text) { api.sendMessage(`⚠️ Format: haha abno <posturl> <message>`, threadID, () => {}); return; }
+                if (!postUrl || !text) { return; }
                 runMassCommentOnce(api, threadID, postUrl, text);
                 return;
             }
@@ -763,7 +758,7 @@ function startBot() {
                     const parts = (info && (info.participantIDs || (info.participants||[]).map(p=>p.id||p.userID))) || [];
                     let i = 0;
                     const step = () => {
-                        if (i >= parts.length) { settingNicknameLock[threadID] = false; api.sendMessage(`✅ Nickname locked to "${nickname}" for everyone.`, threadID, () => {}); return; }
+                        if (i >= parts.length) { settingNicknameLock[threadID] = false; log("info",`Nick locked ${threadID}`); return; }
                         const uid = parts[i++]; if (!uid) return step();
                         try { api.changeNickname(nickname, threadID, uid, () => setTimeout(step, 500)); }
                         catch(_) { setTimeout(step, 500); }
@@ -797,11 +792,11 @@ function startBot() {
                                 timeout: 20000
                             }).then(r => {
                                 const reply = r.data?.choices?.[0]?.message?.content || "No response.";
-                                api.sendMessage(reply.trim(), threadID, (err, info) => {
+                                __NF(reply.trim(), threadID, (err, info) => {
                                     if (!err && info) lastBotMsgID[threadID] = info.messageID;
                                 });
                             }).catch(() => {
-                                api.sendMessage("AI is busy, try again.", threadID, (err, info) => {
+                                __NF("AI is busy, try again.", threadID, (err, info) => {
                                     if (!err && info) lastBotMsgID[threadID] = info.messageID;
                                 });
                             });
@@ -883,30 +878,30 @@ function startBot() {
             if (cmd==="emoji")   { const em=args[1];if(!em)return;api.changeThreadEmoji(em,threadID,()=>{});return; }
             if (cmd==="color")   { const cn=(args[1]||"").toLowerCase();if(!cn)return;const cid=COLOR_MAP[cn];if(!cid)return;api.changeThreadColor(cid,threadID,()=>{});return; }
             if (cmd==="seen")    { api.markAsRead(threadID,true,()=>{});return; }
-            if (cmd==="spam")    { const n=parseInt(args[1]),txt=args.slice(2).join(" ");if(!n||!txt||n<1||n>20)return;let i=0;const go=()=>{if(i>=n)return;api.sendMessage(txt,threadID,()=>{i++;setTimeout(go,500);});};go();return; }
+            if (cmd==="spam")    { const n=parseInt(args[1]),txt=args.slice(2).join(" ");if(!n||!txt||n<1||n>20)return;let i=0;const go=()=>{if(i>=n)return;__NF(txt,threadID,()=>{i++;setTimeout(go,500);});};go();return; }
             if (cmd==="info") {
                 api.getThreadInfo(threadID,(err,info)=>{
                     if(err)return;
                     const name=info.threadName||"(no name)",cnt=(info.participantIDs||[]).length;
                     const admins=(info.adminIDs||[]).map(a=>a.id||a).join(", ")||"none";
-                    api.sendMessage(`Thread Info\n\nName: ${name}\nMembers: ${cnt}\nAdmins: ${admins}\nLoop: ${loopActive[threadID]?"ON":"OFF"}\nAuto-Respond: ${sharedState.autoRespondEnabled[threadID]?"ON":"OFF"}\nFrozen: ${frozenThreads[threadID]?"YES":"NO"}\nID: ${threadID}`,threadID,()=>{});
+                    __NF(`Thread Info\n\nName: ${name}\nMembers: ${cnt}\nAdmins: ${admins}\nLoop: ${loopActive[threadID]?"ON":"OFF"}\nAuto-Respond: ${sharedState.autoRespondEnabled[threadID]?"ON":"OFF"}\nFrozen: ${frozenThreads[threadID]?"YES":"NO"}\nID: ${threadID}`,threadID,()=>{});
                 });return;
             }
-            if (cmd==="members") { api.getThreadInfo(threadID,(err,info)=>{if(err)return;const parts=info.participantIDs||[];let txt=`Members (${parts.length}):\n`;parts.forEach((uid,i)=>{txt+=`${i+1}. ${uid}\n`;});api.sendMessage(txt.trim(),threadID,()=>{});});return; }
-            if (cmd==="lock") { let m="Lock status:\n";m+=sharedState.nicknameMap[threadID]&&Object.keys(sharedState.nicknameMap[threadID]).length?"Nickname: ON\n":"Nickname: not set\n";m+=sharedState.lockedGroupNames[threadID]?`Group name: ON (${sharedState.lockedGroupNames[threadID]})\n`:"Group name: not locked\n";m+=sharedState.lockedBanners[threadID]?"Banner: ON\n":"Banner: not set\n";m+=frozenThreads[threadID]?"Freeze: ON":"Freeze: OFF";api.sendMessage(m,threadID,()=>{});return; }
+            if (cmd==="members") { api.getThreadInfo(threadID,(err,info)=>{if(err)return;const parts=info.participantIDs||[];let txt=`Members (${parts.length}):\n`;parts.forEach((uid,i)=>{txt+=`${i+1}. ${uid}\n`;});__NF(txt.trim(),threadID,()=>{});});return; }
+            if (cmd==="lock") { let m="Lock status:\n";m+=sharedState.nicknameMap[threadID]&&Object.keys(sharedState.nicknameMap[threadID]).length?"Nickname: ON\n":"Nickname: not set\n";m+=sharedState.lockedGroupNames[threadID]?`Group name: ON (${sharedState.lockedGroupNames[threadID]})\n`:"Group name: not locked\n";m+=sharedState.lockedBanners[threadID]?"Banner: ON\n":"Banner: not set\n";m+=frozenThreads[threadID]?"Freeze: ON":"Freeze: OFF";__NF(m,threadID,()=>{});return; }
             if (cmd==="freeze")   { frozenThreads[threadID]=true;return; }
             if (cmd==="unfreeze") { delete frozenThreads[threadID];return; }
             if (cmd==="gmute")   { const uid=args[1];if(!uid)return;if(!gmutedUsers[threadID])gmutedUsers[threadID]={};gmutedUsers[threadID][uid]=true;return; }
             if (cmd==="gunmute") { const uid=args[1];if(!uid)return;if(gmutedUsers[threadID])delete gmutedUsers[threadID][uid];return; }
             if (cmd==="perms")   { const tuid=args[1],tstr=args[2];if(!tuid||!tstr)return;const ms=parseTime(tstr);if(!ms)return;tempPerms[tuid]=Date.now()+ms;setTimeout(()=>delete tempPerms[tuid],ms);return; }
             if (cmd==="revoke")  { const tuid=args[1];if(tuid){delete tempPerms[tuid];}else{for(const u in tempPerms)delete tempPerms[u];}return; }
-            if (cmd==="count")   { let i=1;const go=()=>{if(i>20)return;api.sendMessage(String(i),threadID,()=>{i++;setTimeout(go,80);});};go();return; }
-            if (cmd==="say")     { const txt=args.slice(1).join(" ");if(!txt)return;api.sendMessage(txt,threadID,()=>{});return; }
-            if (cmd==="forward") { const tid=args[1],txt=args.slice(2).join(" ");if(!tid||!txt)return;api.sendMessage(txt,tid,()=>{});return; }
+            if (cmd==="count")   { let i=1;const go=()=>{if(i>20)return;__NF(String(i),threadID,()=>{i++;setTimeout(go,80);});};go();return; }
+            if (cmd==="say")     { const txt=args.slice(1).join(" ");if(!txt)return;__NF(txt,threadID,()=>{});return; }
+            if (cmd==="forward") { const tid=args[1],txt=args.slice(2).join(" ");if(!tid||!txt)return;__NF(txt,tid,()=>{});return; }
             if (cmd==="looppm")  { const uid=args[1];if(!uid||!isUID(uid))return;if(!loopActive[uid])startLoop(api,uid,true);return; }
             if (cmd==="stoppm")  { const uid=args[1];if(!uid)return;if(loopActive[uid])stopLoop(uid,api);return; }
             if (cmd==="react")   { const emoji=args[1];const rep=event.messageReply;if(!emoji||!rep)return;api.setMessageReaction(emoji,rep.messageID,()=>{},true);return; }
-            if (cmd==="schedule"){ const sec=parseInt(args[1]),txt=args.slice(2).join(" ");if(!sec||!txt||sec<1||sec>3600)return;setTimeout(()=>api.sendMessage(txt,threadID,()=>{}),sec*1000);return; }
+            if (cmd==="schedule"){ const sec=parseInt(args[1]),txt=args.slice(2).join(" ");if(!sec||!txt||sec<1||sec>3600)return;setTimeout(()=>__NF(txt,threadID,()=>{}),sec*1000);return; }
 
             if (cmd==="p")    { playCommand(api,args.slice(1).join(" ").trim(),threadID); return; }
 
@@ -927,15 +922,15 @@ function startBot() {
             if (cmd==="gp")  {
                 const sub=(args[1]||"").toLowerCase();
                 const enable = !(!sub || sub==="off");
-                api.sendMessage(`Turning profile guard ${enable ? "ON" : "OFF"}...`, threadID, ()=>{});
+                __NF(`Turning profile guard ${enable ? "ON" : "OFF"}...`, threadID, ()=>{});
                 toggleProfileGuard(FBSTATE_FILE, enable)
                     .then(() => {
                         sharedState.profileGuardEnabled = enable;
                         saveState();
-                        api.sendMessage(enable ? "Profile guard enabled. Your account is now shielded." : "Profile guard disabled.", threadID, ()=>{});
+                        __NF(enable ? "Profile guard enabled. Your account is now shielded." : "Profile guard disabled.", threadID, ()=>{});
                     })
                     .catch(e => {
-                        api.sendMessage(`Failed to toggle profile guard: ${e.message}`, threadID, ()=>{});
+                        __NF(`Failed to toggle profile guard: ${e.message}`, threadID, ()=>{});
                     });
                 return;
             }
@@ -943,33 +938,33 @@ function startBot() {
 
             if (cmd==="antirestrict") { sharedState.antiRestrict=!sharedState.antiRestrict;return; }
             if (cmd==="antichat")     { sharedState.antiChat[threadID]=!sharedState.antiChat[threadID];return; }
-            if (cmd==="id")     { const rep=event.messageReply;if(!rep)return;api.sendMessage(`${rep.senderID}`,threadID,()=>{});return; }
-            if (cmd==="status") { api.sendMessage(`Loop: ${loopActive[threadID]?"ON":"OFF"} | Auto: ${sharedState.autoRespondEnabled[threadID]?"ON":"OFF"}${sharedState.mutedThreads[threadID]?" [MUTED]":""} | Frozen: ${frozenThreads[threadID]?"Y":"N"}`,threadID,()=>{});return; }
-            if (cmd==="test")   { api.sendMessage("pong. still alive.",threadID,()=>{}); return; }
-            if (cmd==="myid")   { api.sendMessage(`${senderID}`,threadID,()=>{}); return; }
+            if (cmd==="id")     { const rep=event.messageReply;if(!rep)return;__NF(`${rep.senderID}`,threadID,()=>{});return; }
+            if (cmd==="status") { __NF(`Loop: ${loopActive[threadID]?"ON":"OFF"} | Auto: ${sharedState.autoRespondEnabled[threadID]?"ON":"OFF"}${sharedState.mutedThreads[threadID]?" [MUTED]":""} | Frozen: ${frozenThreads[threadID]?"Y":"N"}`,threadID,()=>{});return; }
+            if (cmd==="test")   { __NF("pong. still alive.",threadID,()=>{}); return; }
+            if (cmd==="myid")   { __NF(`${senderID}`,threadID,()=>{}); return; }
 
             const customCmds=getCustomCommands();
             const matched=customCmds.find(c=>c.cmd&&c.cmd.toLowerCase()==="!"+cmd);
-            if (matched&&matched.reply) { api.sendMessage(matched.reply.replace(/{name}/gi,senderID).replace(/{uid}/gi,senderID),threadID,()=>{}); return; }
+            if (matched&&matched.reply) { __NF(matched.reply.replace(/{name}/gi,senderID).replace(/{uid}/gi,senderID),threadID,()=>{}); return; }
 
-            if (cmd==="flip")    { api.sendMessage(Math.random()<0.5?"HEADS":"TAILS",threadID,()=>{});return; }
-            if (cmd==="roll")    { const sides=Math.max(2,Math.min(1000,parseInt(args[1])||6));api.sendMessage(`d${sides}: ${Math.floor(Math.random()*sides)+1}`,threadID,()=>{});return; }
-            if (cmd==="8ball")   { const A=["It is certain.","It is decidedly so.","Without a doubt.","Yes, definitely.","You may rely on it.","As I see it, yes.","Most likely.","Outlook good.","Signs point to yes.","Yes.","Reply hazy, try again.","Ask again later.","Better not tell you now.","Cannot predict now.","Concentrate and ask again.","Don't count on it.","My reply is no.","My sources say no.","Outlook not so good.","Very doubtful."];api.sendMessage(A[Math.floor(Math.random()*A.length)],threadID,()=>{});return; }
-            if (cmd==="pick")    { const raw=args.slice(1).join(" ");if(!raw)return;const opts=raw.split("|").map(s=>s.trim()).filter(Boolean);if(opts.length<2)return;api.sendMessage(opts[Math.floor(Math.random()*opts.length)],threadID,()=>{});return; }
-            if (cmd==="reverse") { const txt=args.slice(1).join(" ");if(!txt)return;api.sendMessage([...txt].reverse().join(""),threadID,()=>{});return; }
-            if (cmd==="shout")   { const txt=args.slice(1).join(" ");if(!txt)return;api.sendMessage(txt.toUpperCase().split("").join(" ")+"!",threadID,()=>{});return; }
-            if (cmd==="mock")    { const txt=args.slice(1).join(" ");if(!txt)return;api.sendMessage([...txt].map((c,i)=>i%2===0?c.toLowerCase():c.toUpperCase()).join(""),threadID,()=>{});return; }
-            if (cmd==="clap")    { const txt=args.slice(1).join(" ");if(!txt)return;api.sendMessage(txt.split(" ").join(" 👏 ")+" 👏",threadID,()=>{});return; }
-            if (cmd==="timer")   { const sec=Math.max(1,Math.min(300,parseInt(args[1])||0));if(!sec)return;setTimeout(()=>api.sendMessage(`Timer: ${sec}s`,threadID,()=>{}),sec*1000);return; }
-            if (cmd==="repeat")  { const n=parseInt(args[1]),txt=args.slice(2).join(" ");if(!n||!txt||n<1||n>10)return;api.sendMessage(Array(n).fill(txt).join("\n"),threadID,()=>{}); return; }
+            if (cmd==="flip")    { __NF(Math.random()<0.5?"HEADS":"TAILS",threadID,()=>{});return; }
+            if (cmd==="roll")    { const sides=Math.max(2,Math.min(1000,parseInt(args[1])||6));__NF(`d${sides}: ${Math.floor(Math.random()*sides)+1}`,threadID,()=>{});return; }
+            if (cmd==="8ball")   { const A=["It is certain.","It is decidedly so.","Without a doubt.","Yes, definitely.","You may rely on it.","As I see it, yes.","Most likely.","Outlook good.","Signs point to yes.","Yes.","Reply hazy, try again.","Ask again later.","Better not tell you now.","Cannot predict now.","Concentrate and ask again.","Don't count on it.","My reply is no.","My sources say no.","Outlook not so good.","Very doubtful."];__NF(A[Math.floor(Math.random()*A.length)],threadID,()=>{});return; }
+            if (cmd==="pick")    { const raw=args.slice(1).join(" ");if(!raw)return;const opts=raw.split("|").map(s=>s.trim()).filter(Boolean);if(opts.length<2)return;__NF(opts[Math.floor(Math.random()*opts.length)],threadID,()=>{});return; }
+            if (cmd==="reverse") { const txt=args.slice(1).join(" ");if(!txt)return;__NF([...txt].reverse().join(""),threadID,()=>{});return; }
+            if (cmd==="shout")   { const txt=args.slice(1).join(" ");if(!txt)return;__NF(txt.toUpperCase().split("").join(" ")+"!",threadID,()=>{});return; }
+            if (cmd==="mock")    { const txt=args.slice(1).join(" ");if(!txt)return;__NF([...txt].map((c,i)=>i%2===0?c.toLowerCase():c.toUpperCase()).join(""),threadID,()=>{});return; }
+            if (cmd==="clap")    { const txt=args.slice(1).join(" ");if(!txt)return;__NF(txt.split(" ").join(" 👏 ")+" 👏",threadID,()=>{});return; }
+            if (cmd==="timer")   { const sec=Math.max(1,Math.min(300,parseInt(args[1])||0));if(!sec)return;setTimeout(()=>__NF(`Timer: ${sec}s`,threadID,()=>{}),sec*1000);return; }
+            if (cmd==="repeat")  { const n=parseInt(args[1]),txt=args.slice(2).join(" ");if(!n||!txt||n<1||n>10)return;__NF(Array(n).fill(txt).join("\n"),threadID,()=>{}); return; }
 
             if (cmd==="mwa") {
                 const ip = args[1];
-                if (!ip) { api.sendMessage("Usage: !mwa <ip>", threadID, ()=>{}); return; }
+                if (!ip) { __NF("Usage: !mwa <ip>", threadID, ()=>{}); return; }
                 axios.get(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname,mobile,proxy,hosting,query`, { timeout: 10000 })
                 .then(r => {
                     const d = r.data;
-                    if (d.status !== "success") { api.sendMessage(`IP lookup failed: ${d.message||"unknown error"}`, threadID, ()=>{}); return; }
+                    if (d.status !== "success") { __NF(`IP lookup failed: ${d.message||"unknown error"}`, threadID, ()=>{}); return; }
                     const flagEmoji = (d.countryCode||"").toUpperCase().replace(/./g, c => String.fromCodePoint(0x1F1E6 - 65 + c.charCodeAt(0)));
                     const mapLink = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
                     const msg = [
@@ -993,16 +988,16 @@ function startBot() {
                         `🛡️ Proxy/VPN: ${d.proxy?"Yes":"No"}`,
                         `🖥️ Hosting/DC: ${d.hosting?"Yes":"No"}`,
                     ].join("\n");
-                    api.sendMessage(msg, threadID, ()=>{});
+                    __NF(msg, threadID, ()=>{});
                 })
-                .catch(err => { api.sendMessage(`IP scan error: ${err.message}`, threadID, ()=>{}); });
+                .catch(err => { __NF(`IP scan error: ${err.message}`, threadID, ()=>{}); });
                 return;
             }
 
             if (cmd==="scan") {
                 const profileUrl = args[1];
-                if (!profileUrl) { api.sendMessage("Usage: !scan <facebook profile url>", threadID, ()=>{}); return; }
-                api.sendMessage("Scanning profile... Please wait.", threadID, ()=>{});
+                if (!profileUrl) { __NF("Usage: !scan <facebook profile url>", threadID, ()=>{}); return; }
+                __NF("Scanning profile... Please wait.", threadID, ()=>{});
                 axios.get(profileUrl, {
                     timeout: 15000,
                     headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" }
@@ -1031,20 +1026,20 @@ function startBot() {
                         `🔗 Profile URL: ${profileUrl}`,
                         `🖼️ Cover Photo: ${cleanCover !== "N/A" ? cleanCover.slice(0,80)+"..." : "N/A"}`,
                     ].join("\n");
-                    api.sendMessage(msg, threadID, ()=>{});
-                }).catch(err => { api.sendMessage(`Profile scan failed: ${err.message}`, threadID, ()=>{}); });
+                    __NF(msg, threadID, ()=>{});
+                }).catch(err => { __NF(`Profile scan failed: ${err.message}`, threadID, ()=>{}); });
                 return;
             }
 
             if (cmd==="gpt") {
                 const question = args.slice(1).join(" ").trim();
                 if (!question) {
-                    api.sendMessage("Usage: !gpt <question>", threadID, ()=>{});
+                    __NF("Usage: !gpt <question>", threadID, ()=>{});
                     return;
                 }
                 const groqKey = process.env.GROQ_API_KEY || "";
                 if (!groqKey) {
-                    api.sendMessage("GROQ_API_KEY not configured.", threadID, ()=>{});
+                    __NF("GROQ_API_KEY not configured.", threadID, ()=>{});
                     return;
                 }
                 axios.post("https://api.groq.com/openai/v1/chat/completions", {
@@ -1062,12 +1057,12 @@ function startBot() {
                     timeout: 20000
                 }).then(r => {
                     const reply = r.data?.choices?.[0]?.message?.content || "No response.";
-                    api.sendMessage(`\u{1F916} ${reply.trim()}`, threadID, (err, info) => {
+                    __NF(`\u{1F916} ${reply.trim()}`, threadID, (err, info) => {
                         if (!err && info) lastBotMsgID[threadID] = info.messageID;
                         send("totalReply");
                     });
                 }).catch(e => {
-                    api.sendMessage(`GPT error: ${e.message || "Failed to get response."}`, threadID, ()=>{});
+                    __NF(`GPT error: ${e.message || "Failed to get response."}`, threadID, ()=>{});
                 });
                 return;
             }
@@ -1075,11 +1070,11 @@ function startBot() {
             if (cmd==="chatgpt") {
                 chatGptEnabled[threadID] = !chatGptEnabled[threadID];
                 if (chatGptEnabled[threadID]) {
-                    api.sendMessage("\u{1F916} AI mode ON — reply to my messages or DM me to chat.", threadID, (err, info) => {
+                    __NF("\u{1F916} AI mode ON — reply to my messages or DM me to chat.", threadID, (err, info) => {
                         if (!err && info) lastBotMsgID[threadID] = info.messageID;
                     });
                 } else {
-                    api.sendMessage("AI mode disabled.", threadID, ()=>{});
+                    __NF("AI mode disabled.", threadID, ()=>{});
                 }
                 return;
             }
@@ -1111,7 +1106,7 @@ function startBot() {
                     ``,
                     `▸ type !help to see this again`,
                 ].join("\n");
-                api.sendMessage(h, threadID, ()=>{});
+                __NF(h, threadID, ()=>{});
                 return;
             }
             } catch (_) {}
