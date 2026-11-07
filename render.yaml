@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: dummylbot
+    env: node
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+    autoDeploy: true

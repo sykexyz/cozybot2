@@ -1,0 +1,21 @@
+node_modules/
+build/
+dist/
+
+# Sensitive runtime data (cookies, sessions, user data)
+data/
+!data/.gitkeep
+
+# Temp artifacts
+tmp/
+repo.bundle
+
+# Platform / agent internals & sensitive attachments
+.base/
+.polydev/
+attached_assets/
+
+.env
+.env.*
+*.log
+npm-debug.log*
