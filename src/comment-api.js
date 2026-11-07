@@ -1,97 +1,161 @@
 "use strict";
 
-/**
- * Mass comment sender adapter for fca-riyad.
- * Adds postComment() and reactToComment() to the api using the Facebook
- * mobile Graph API endpoints (same mechanism used internally by FCA libs).
- * This works on top of fca-riyad's session (cookie jar / ctx).
- */
+const https = require("https");
+const http  = require("http");
+const { URL } = require("url");
 
-function buildCookieString(jar) {
-    try {
-        const url = "https://www.facebook.com";
-        const cookies = jar.getCookiesSync(url);
-        return cookies.map(c => `${c.key}=${c.value}`).join("; ");
-    } catch (_) { return ""; }
+function cookieStringFromAppState(appState) {
+    if (!Array.isArray(appState)) return "";
+    return appState.map(c => `${c.key}=${c.value}`).join("; ");
 }
 
-function getFbDtsg(ctx) {
-    if (ctx && ctx.fb_dtsg) return ctx.fb_dtsg;
-    if (ctx && ctx.globalOptions && ctx.globalOptions.fb_dtsg) return ctx.globalOptions.fb_dtsg;
+function computeJazoest(fbDtsg) {
+    if (!fbDtsg) return "";
+    let t = "2";
+    for (let i = 0; i < fbDtsg.length; i++) t += fbDtsg.charCodeAt(i);
+    return t;
+}
+
+function fetchText(urlStr, { method = "GET", headers = {}, body = null, cookie = "", redirect = "follow", timeout = 20000 } = {}) {
+    return new Promise((resolve, reject) => {
+        try {
+            const u = new URL(urlStr);
+            const lib = u.protocol === "https:" ? https : http;
+            const opts = {
+                method,
+                hostname: u.hostname,
+                path: u.pathname + (u.search || ""),
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    ...(cookie ? { Cookie: cookie } : {}),
+                    ...headers,
+                },
+                timeout,
+            };
+            const req = lib.request(opts, (res) => {
+                if (redirect === "follow" && [301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+                    const loc = new URL(res.headers.location, urlStr).toString();
+                    res.resume();
+                    return resolve(fetchText(loc, { method: "GET", headers, body: null, cookie, redirect, timeout }));
+                }
+                let data = "";
+                res.setEncoding("utf8");
+                res.on("data", c => data += c);
+                res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data, finalUrl: urlStr }));
+            });
+            req.on("timeout", () => { req.destroy(); reject(new Error("Request timeout")); });
+            req.on("error", reject);
+            if (body) req.write(body);
+            req.end();
+        } catch (e) { reject(e); }
+    });
+}
+
+function extractFbDtsg(html) {
+    if (!html) return null;
+    let m = html.match(/name="fb_dtsg"\s+value="([^"]+)"/) || html.match(/"token"\s*:\s*"([^"]+)"/);
+    if (m) return m[1];
+    m = html.match(/\["DTSGInitialData",\[\],\{"token":"([^"]+)"/);
+    return m ? m[1] : null;
+}
+
+function extractPostIdFromUrl(finalUrl, html) {
+    const tryStr = (s) => {
+        if (!s) return null;
+        let m = s.match(/[?&](?:story_fbid|fbid)=(\d+)/) || s.match(/\/posts\/(\d+)/) || s.match(/\/videos\/(\d+)/) || s.match(/\/permalink\/(\d+)/);
+        if (m) return m[1];
+        m = s.match(/\/(\d{10,})(?:[/?#]|$)/);
+        return m ? m[1] : null;
+    };
+    let id = tryStr(finalUrl);
+    if (id) return id;
+    if (html) {
+        let m = html.match(/"top_level_post_id"\s*:\s*"(\d+)"/) || html.match(/"ft_ent_identifier"\s*:\s*"?(\d+)"?/) || html.match(/story_fbid=(\d+)/) || html.match(/name="ft_ent_identifier"\s+value="(\d+)"/);
+        if (m) return m[1];
+        id = tryStr(html.match(/https:\/\/[^"'\s<>]*story_fbid=\d+[^"'\s<>]*/)?.[0]);
+        if (id) return id;
+    }
     return null;
 }
 
-async function postComment(api, ctx, postID, text) {
-    const jar = ctx.jar || (api.getAppState && { getCookiesSync: () => [] });
-    const cookieStr = buildCookieString(jar);
-    const fb_dtsg = getFbDtsg(ctx) || "";
-    const userID = ctx.userID || ctx.i_userID || "";
+async function getTokens(api) {
+    const appState = typeof api.getAppState === "function" ? api.getAppState() : [];
+    const cookie = cookieStringFromAppState(appState);
+    const userID = typeof api.getCurrentUserID === "function" ? api.getCurrentUserID() : "";
+    if (!cookie) throw new Error("No session cookies (appState empty). Re-login the bot.");
+    // Try to get fb_dtsg from mbasic home
+    let res = await fetchText("https://mbasic.facebook.com/", { cookie });
+    let fb_dtsg = extractFbDtsg(res.body);
+    if (!fb_dtsg) {
+        res = await fetchText("https://m.facebook.com/", { cookie });
+        fb_dtsg = extractFbDtsg(res.body);
+    }
+    if (!fb_dtsg) throw new Error("Could not get fb_dtsg token (session may be expired/checkpoint).");
+    const jazoest = computeJazoest(fb_dtsg);
+    return { cookie, fb_dtsg, jazoest, userID };
+}
 
-    if (!postID || !text) throw new Error("postID and text are required");
+async function resolvePostId(postRef, cookie) {
+    const s = String(postRef || "").trim();
+    if (/^\d{6,}$/.test(s)) return s;
+    // try to extract from URL directly
+    let id = extractPostIdFromUrl(s, "");
+    if (id && /^\d{6,}$/.test(id)) return id;
+    // resolve via fetch (handles /share/ links)
+    if (/^https?:\/\//i.test(s)) {
+        const res = await fetchText(s, { cookie, redirect: "follow" });
+        id = extractPostIdFromUrl(res.finalUrl || s, res.body);
+        if (id) return id;
+        // last resort: try mbasic version
+        const mb = s.replace("://www.facebook.com", "://mbasic.facebook.com").replace("://m.facebook.com", "://mbasic.facebook.com");
+        if (mb !== s) {
+            const res2 = await fetchText(mb, { cookie, redirect: "follow" });
+            id = extractPostIdFromUrl(res2.finalUrl || mb, res2.body);
+            if (id) return id;
+        }
+    }
+    return null;
+}
 
-    const params = new URLSearchParams();
-    params.append("comment_text", text);
-    params.append("fb_dtsg", fb_dtsg);
-    params.append("__user", userID);
-    params.append("__a", "1");
-    params.append("__req", "1b");
-    params.append("__rev", "1015919737");
+async function postComment(api, ctx, postRef, text) {
+    if (!postRef || !text) throw new Error("post URL/ID and text are required");
+    const { cookie, fb_dtsg, jazoest, userID } = await getTokens(api);
+    const postID = await resolvePostId(postRef, cookie);
+    if (!postID) throw new Error(`Hindi makuha ang post ID mula sa link: ${postRef} (gumamit ng direct post URL na may /posts/<id> o numeric ID)`);
 
-    const url = `https://mbasic.facebook.com/a/comment.php?ft_ent_identifier=${encodeURIComponent(postID)}`;
+    // Try mbasic comment endpoint
+    const form = new URLSearchParams();
+    form.append("fb_dtsg", fb_dtsg);
+    form.append("jazoest", jazoest);
+    form.append("comment_text", String(text).trim());
 
-    const resp = await fetch(url, {
+    const url = `https://mbasic.facebook.com/a/comment.php?fs=8&actionsource=2&comment_logging&ft_ent_identifier=${encodeURIComponent(postID)}`;
+    const res = await fetchText(url, {
         method: "POST",
+        cookie,
         headers: {
-            "Cookie": cookieStr,
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer": `https://mbasic.facebook.com/story.php?story_fbid=${postID}`,
             "Origin": "https://mbasic.facebook.com",
+            "Referer": `https://mbasic.facebook.com/story.php?story_fbid=${postID}&id=${postID}`,
         },
-        body: params.toString(),
+        body: form.toString(),
         redirect: "manual",
     });
 
-    // mbasic comment endpoint returns 302 on success
-    if (resp.status === 302 || resp.status === 200) {
-        return { success: true, postID, text, status: resp.status };
+    if (res.status === 302 || res.status === 303 || res.status === 200) {
+        const b = (res.body || "").toLowerCase();
+        if (b.includes("login") && b.includes("password") || b.includes("checkpoint") || b.includes("you can't use this feature")) {
+            throw new Error("Comment failed: session checkpoint/restricted (fb_dtsg/cookie issue).");
+        }
+        return { success: true, postID, status: res.status };
     }
-    const body = await resp.text().catch(() => "");
-    if (body.includes("comment_text") || body.toLowerCase().includes("checkpoint") || body.toLowerCase().includes("login")) {
-        throw new Error("Comment may have failed (checkpoint/login page detected)");
-    }
-    return { success: true, postID, text, status: resp.status };
+    throw new Error(`Comment request failed (HTTP ${res.status}).`);
 }
 
 async function reactToComment(api, ctx, commentID, reaction) {
-    // reaction: like, love, haha, wow, sad, angry (mapped to type codes)
-    const reactionMap = { like: 1, love: 2, wow: 3, haha: 4, sad: 7, angry: 8 };
-    const type = reactionMap[String(reaction || "like").toLowerCase()] || 1;
-    const jar = ctx.jar || (api.getAppState && { getCookiesSync: () => [] });
-    const cookieStr = buildCookieString(jar);
-    const fb_dtsg = getFbDtsg(ctx) || "";
-    const userID = ctx.userID || ctx.i_userID || "";
-
-    const params = new URLSearchParams();
-    params.append("fb_dtsg", fb_dtsg);
-    params.append("__user", userID);
-    params.append("__a", "1");
-
-    // Use ufi reaction endpoint
-    const url = `https://mbasic.facebook.com/reactions/picker/?ft_id=${encodeURIComponent(commentID)}&reaction_type=${type}`;
-    const resp = await fetch(url, {
-        method: "GET",
-        headers: {
-            "Cookie": cookieStr,
-            "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://mbasic.facebook.com/",
-        },
-        redirect: "manual",
-    });
-    if (resp.status >= 200 && resp.status < 400) {
-        return { success: true, commentID, reaction, status: resp.status };
-    }
-    throw new Error(`React failed with status ${resp.status}`);
+    return { success: false, error: "reactToComment not implemented for this session type" };
 }
 
 function attachCommentApi(api, ctx) {
