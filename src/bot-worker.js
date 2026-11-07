@@ -204,7 +204,8 @@ function getAllReplies() {
     const cfg = getBotConfig();
     const useBuiltin = cfg.useBuiltinReplies !== false;
     const base = useBuiltin ? [...replies] : [];
-    return [...base, ...getCustomReplies()].filter(r => r && r.trim());
+    const all = [...base, ...getCustomReplies()].filter(r => r && r.trim());
+    return all.length ? all : ["Hey!"];
 }
 
 function getRandomReply() { const a = getAllReplies(); return a.length ? a[Math.floor(Math.random()*a.length)] : "..."; }
@@ -706,11 +707,14 @@ function startBot() {
 
             // "jwu" — toggle loop on/off (same trigger to start/stop)
             if (msgLower === CMD_JWU) {
-                if (senderID === BOT_SELF_ID) return; // avoid self-trigger loops
-                const can = isPM || isAuthorized(senderID);
-                if (!can) return;
-                if (loopActive[threadID]) stopLoop(threadID, api);
-                else startLoop(api, threadID, isPM);
+                if (isGroup && !isAuthorized(senderID)) return;
+                if (loopActive[threadID]) {
+                    stopLoop(threadID, api);
+                    api.sendMessage("Loop OFF", threadID, () => {}, null, isGroup);
+                } else {
+                    startLoop(api, threadID, isPM);
+                    api.sendMessage("Loop ON", threadID, () => {}, null, isGroup);
+                }
                 return;
             }
 
